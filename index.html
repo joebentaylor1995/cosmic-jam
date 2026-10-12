@@ -84,13 +84,13 @@
 
 /* ---------- parameters ---------- */
 const P = {
-  viscosity: 4.5, elasticity: 2.8, tension: 1.3, breathing: 2,
-  reach: 0.05, follow: 90, slide: 1.2, thickness: 1, snap: 25,
-  burstSize: 0.07, burstForce: 1.15,
-  refraction: 3, rim: 1, seeThrough: 0.36, smear: 1,
-  density: 0.95, brightness: 0.7, twinkle: 1, nebula: 1.45,
-  showType: true, maxDpr: 1.5,
-  cVoid: '#04050c', cBody: '#1b28c9', cDeep: '#080b45', cRim: '#a6ecff', cGlow: '#1a2c9a', cNeb: '#b97cff',
+  viscosity: 3.8, elasticity: 2.8, tension: 1.3, breathing: 1.9,
+  reach: 0.05, follow: 100, slide: 1.2, thickness: 0.85, snap: 25,
+  burstSize: 0.04, burstForce: 1.15,
+  refraction: 6, rim: 1.45, seeThrough: 0.11, smear: 0.4,
+  density: 1, brightness: 0.7, twinkle: 0.9, nebula: 0.55,
+  showType: true, maxDpr: 2,
+  cVoid: '#04050c', cBody: '#541ac9', cDeep: '#040c34', cRim: '#a6ecff', cGlow: '#1a2e9a', cNeb: '#8724fa',
   cStar1: '#f4f1ff', cStar2: '#6fe4ff', cStar3: '#a98bff', cStar4: '#5470ff'
 };
 const FONT = '"Anton", "Impact", "Arial Narrow", sans-serif';
@@ -787,10 +787,10 @@ function setupPane() {
   st.addInput(P, 'snap', { label: 'snap distance %', min: 10, max: 150, step: 1 });
   st.addInput(P, 'smear', { label: 'interior smear', min: 0, max: 3, step: 0.05 });
   const bu = pane.addFolder({ title: 'Burst' });
-  bu.addInput(P, 'burstSize', { label: 'hole size', min: 0.04, max: 0.35, step: 0.01 });
+  bu.addInput(P, 'burstSize', { label: 'hole size', min: 0.02, max: 0.35, step: 0.01 });
   bu.addInput(P, 'burstForce', { label: 'force', min: 0, max: 3, step: 0.05 });
   const lk = pane.addFolder({ title: 'Look' });
-  lk.addInput(P, 'refraction', { min: 0, max: 6, step: 0.05 });
+  lk.addInput(P, 'refraction', { min: 0, max: 10, step: 0.05 });
   lk.addInput(P, 'rim', { label: 'rim thickness', min: 0.4, max: 2.5, step: 0.05 });
   lk.addInput(P, 'seeThrough', { label: 'see-through', min: 0, max: 1, step: 0.01 });
   lk.addInput(P, 'density', { label: 'glitter density', min: 0.2, max: 2, step: 0.05 });
