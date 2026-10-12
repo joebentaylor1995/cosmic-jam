@@ -250,7 +250,7 @@ void main(){
       float x = dl / max(hl.z, 1.0);
       float push = hl.w * 2.3 * x * exp(-x*x);
       vec2 dir = dv / dl;
-      q -= (dir + vec2(-dir.y, dir.x) * 0.25) * push;
+      q += (dir + vec2(-dir.y, dir.x) * 0.25) * push;
       energy += uPulseE[i] * exp(-pow((x - 0.85) / 0.3, 2.0)); }
     q -= n.xy * rw * 1.4 * m;
 
