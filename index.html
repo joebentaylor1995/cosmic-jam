@@ -3,10 +3,10 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<meta name="description" content="Sticky cosmic goo in raw WebGL2. Hover to stick, click to burst.">
+<meta name="description" content="Sticky cosmic goo in raw WebGL2. Hover to stick, click to scatter.">
 <meta name="theme-color" content="#04050c">
 <meta property="og:title" content="Cosmic Jam">
-<meta property="og:description" content="Sticky cosmic goo in raw WebGL2. Hover to stick, click to burst.">
+<meta property="og:description" content="Sticky cosmic goo in raw WebGL2. Hover to stick, click to scatter.">
 <title>Cosmic Jam</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -70,7 +70,7 @@
 </header>
 
 <div class="hud">
-  <p class="hint" id="hint">Hover to stick, click to burst</p>
+  <p class="hint" id="hint">Hover to stick, click to scatter</p>
   <div class="btns">
     <button id="toggleType" type="button" aria-pressed="true">Hide type <kbd>T</kbd></button>
   </div>
@@ -85,7 +85,7 @@
 const P = {
   viscosity: 3.8, elasticity: 2.8, tension: 1.3, breathing: 1.9,
   reach: 0.05, follow: 100, slide: 1.2, thickness: 0.85, snap: 25,
-  burstSize: 0.04, burstForce: 1.15,
+  burstSize: 0.22, burstForce: 1.15,
   refraction: 6, rim: 1.45, seeThrough: 0.11, smear: 0.4,
   density: 1, brightness: 0.7, twinkle: 0.9, nebula: 0.55,
   edgeBand: 0.07, edgeGlow: 1.2,
@@ -121,7 +121,7 @@ uniform vec2 uRes; uniform float uScale; uniform float uTime; uniform float uDri
 uniform vec4 uEdge4[32]; uniform float uEdgeX0; uniform float uEdgeDX;
 uniform vec4 uStrand[8]; uniform float uStrandOn;
 uniform vec4 uDrops[16]; uniform int uDropN;
-uniform vec4 uHoles[6]; uniform int uHoleN;
+uniform vec4 uHoles[6]; uniform int uHoleN; uniform float uPulseE[6];
 uniform vec4 uTrail[12]; uniform int uTrailN; uniform float uTrailR;
 uniform sampler2D uScene; uniform float uTextAmt;
 uniform vec2 uMouse; uniform vec2 uPar; uniform float uMouseOn;
@@ -167,7 +167,6 @@ float map(vec2 p){
     d = smin(d, ds, uK);
   }
   for (int i = 0; i < 16; i++){ if (i >= uDropN) break; vec4 r = uDrops[i]; d = smin(d, length(p - r.xy) - r.z, uK*0.55); }
-  for (int i = 0; i < 6; i++){ if (i >= uHoleN) break; vec4 r = uHoles[i]; d = smax(d, r.z - length(p - r.xy), uK*0.7); }
   return d;
 }
 
@@ -245,8 +244,14 @@ void main(){
     /* the space inside: smeared by the cursor, blown by bursts, lensed at the rim */
     vec2 q = p;
     for (int i = 0; i < 12; i++){ if (i >= uTrailN) break; vec4 tr = uTrail[i]; vec2 dv = p - tr.xy; q -= tr.zw * exp(-dot(dv, dv) / (uTrailR*uTrailR)); }
+    /* click scatter: a soft radial shockwave that thins the glitter out, with a slight swirl, then lets it drift back */
+    float energy = 0.0;
     for (int i = 0; i < 6; i++){ if (i >= uHoleN) break; vec4 hl = uHoles[i]; vec2 dv = p - hl.xy; float dl = length(dv) + 1e-3;
-      q -= dv / dl * hl.z * 0.9 * exp(-max(dl - hl.z, 0.0) / (hl.z*0.6 + 1.0)); }
+      float x = dl / max(hl.z, 1.0);
+      float push = hl.w * 2.3 * x * exp(-x*x);
+      vec2 dir = dv / dl;
+      q -= (dir + vec2(-dir.y, dir.x) * 0.25) * push;
+      energy += uPulseE[i] * exp(-pow((x - 0.85) / 0.3, 2.0)); }
     q -= n.xy * rw * 1.4 * m;
 
     float eb = exp(-s / uBand);
@@ -256,6 +261,7 @@ void main(){
                + starLayer(q + uPar*5.0  + drift*0.6, 3.3, 1.0, 0.58*uDensity*boost, 0.8, 0.55)
                + starLayer(q + uPar*12.0 + drift,     5.4, 2.0, 0.45*uDensity*boost, 1.0, 0.9)
                + starLayer(q + uPar*24.0 + drift*1.7, 9.5, 3.0, 0.32*uDensity*boost, 1.4, 1.3);
+    stars *= 1.0 + energy * 1.6;
 
     float band = exp(-pow((q.x*0.55 + q.y - uRes.x*0.62) / (minD*0.22), 2.0));
     float neb = smoothstep(0.42, 0.82, fbm(q*0.0022 + vec2(t*0.01, t*0.006))) * mix(0.35, 1.0, band) * uNebula;
@@ -565,30 +571,17 @@ function stepDrops(dt) {
     const h = holes[i];
     h.age += dt;
     const Rm = P.burstSize * minD;
-    h.R = Rm * (1 - Math.exp(-h.age * 22)) * (1 - smooth(0.12, 1.25, h.age)) * (1 + 0.05 * Math.sin(h.age * 18) * Math.exp(-h.age * 3));
-    if (h.age > 1.35) holes.splice(i, 1);
+    const rise = 1 - Math.exp(-h.age * 28);
+    h.R = Rm * (0.35 + 0.65 * (1 - Math.exp(-h.age * 5)));
+    h.A = P.burstForce * Rm * 0.32 * Math.exp(-h.age * 1.5) * rise;
+    h.E = Math.exp(-h.age * 2.2) * rise;
+    if (h.age > 3) holes.splice(i, 1);
   }
 }
 
 function burst(x, y) {
-  holes.push({ x, y, age: 0, R: 0 });
+  holes.push({ x, y, age: 0, R: 0, A: 0, E: 0 });
   while (holes.length > 6) holes.shift();
-  const Rm = P.burstSize * minD, f = P.burstForce;
-  for (let i = 0; i < N; i++) {
-    const nx = edge.x0 + i * edge.dx, dy = edge.h[i] - y;
-    const w = Math.exp(-((Math.hypot(nx - x, dy) / (Rm * 1.7)) ** 2));
-    edge.v[i] += dy / (Math.abs(dy) + Rm * 0.6) * f * 650 * w;
-  }
-  for (const d of drops) {
-    const dx = d.x - x, dy = d.y - y, dl = Math.hypot(dx, dy) || 1;
-    const w = Math.exp(-((dl / (Rm * 2.2)) ** 2));
-    d.vx += dx / dl * 520 * f * w; d.vy += dy / dl * 520 * f * w;
-  }
-  if (S.attached) {
-    if (S.L > 0.06 * minD) snapStrand({ x, y });
-    else { S.attached = false; S.retract = true; S.rt = 0; }
-    S.cooldown = 0.45;
-  }
 }
 
 function step(dt) {
@@ -615,7 +608,7 @@ function resize() {
 
 /* ---------- render ---------- */
 const vb = gl && prog ? gl.createBuffer() : null;
-const buf = { strand: new Float32Array(32), drops: new Float32Array(64), holes: new Float32Array(24), trail: new Float32Array(48) };
+const buf = { strand: new Float32Array(32), drops: new Float32Array(64), holes: new Float32Array(24), pulseE: new Float32Array(6), trail: new Float32Array(48) };
 function refreshColors() {
   colors = {};
   for (const k of ['cVoid', 'cBody', 'cDeep', 'cRim', 'cGlow', 'cNeb', 'cEdge']) colors[k] = hex3(P[k]);
@@ -651,8 +644,9 @@ function render(rdt) {
   gl.uniform4fv(u.uDrops, buf.drops); gl.uniform1i(u.uDropN, nd);
 
   let nh = 0;
-  for (const h of holes) { if (h.R > 0.5) { buf.holes.set([h.x, h.y, h.R, 0], nh * 4); nh++; } }
+  for (const h of holes) { buf.holes.set([h.x, h.y, h.R, h.A], nh * 4); buf.pulseE[nh] = h.E; nh++; }
   gl.uniform4fv(u.uHoles, buf.holes); gl.uniform1i(u.uHoleN, nh);
+  gl.uniform1fv(u.uPulseE, buf.pulseE);
 
   let nt = 0;
   for (const tr of trail) {
@@ -798,8 +792,8 @@ function setupPane() {
   st.addInput(P, 'thickness', { label: 'strand thickness', min: 0.4, max: 2.2, step: 0.05 });
   st.addInput(P, 'snap', { label: 'snap distance %', min: 10, max: 150, step: 1 });
   st.addInput(P, 'smear', { label: 'interior smear', min: 0, max: 3, step: 0.05 });
-  const bu = pane.addFolder({ title: 'Burst' });
-  bu.addInput(P, 'burstSize', { label: 'hole size', min: 0.02, max: 0.35, step: 0.01 });
+  const bu = pane.addFolder({ title: 'Click scatter' });
+  bu.addInput(P, 'burstSize', { label: 'size', min: 0.05, max: 0.6, step: 0.01 });
   bu.addInput(P, 'burstForce', { label: 'force', min: 0, max: 3, step: 0.05 });
   const lk = pane.addFolder({ title: 'Look' });
   lk.addInput(P, 'refraction', { min: 0, max: 10, step: 0.05 });
