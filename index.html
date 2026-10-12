@@ -1,0 +1,859 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="description" content="Sticky cosmic goo in raw WebGL2. Hover to stick, click to burst.">
+<meta name="theme-color" content="#04050c">
+<meta property="og:title" content="Cosmic Jam">
+<meta property="og:description" content="Sticky cosmic goo in raw WebGL2. Hover to stick, click to burst.">
+<title>Cosmic Jam</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Anton&family=IBM+Plex+Mono:wght@500&display=swap">
+<style>
+  /* Layout: one full-bleed WebGL stage. Type lives in hidden DOM, mirrored into a texture the goo refracts. A quiet HUD sits in the bottom corners. */
+  :root {
+    --void: #04050c;
+    --ink: #dfe5ec;
+    --muted: #7d89b4;
+    --line: rgba(140, 160, 255, 0.24);
+    --focus: #6f8cff;
+    --font-display: "Anton", "Impact", "Arial Narrow", sans-serif;
+    --font-ui: "IBM Plex Mono", ui-monospace, "SFMono-Regular", Menlo, monospace;
+    color-scheme: dark;
+  }
+  html, body { height: 100%; }
+  body { background: var(--void); color: var(--ink); overflow: hidden; font-family: var(--font-ui); }
+  #stage { position: fixed; inset: 0; width: 100%; height: 100%; display: block; touch-action: none; }
+
+  .type { position: fixed; inset: 0; margin: 0; pointer-events: none; user-select: none; }
+  .type h1, .type ul { margin: 0; padding: 0; list-style: none; font-size: inherit; }
+  .type span, .type li {
+    position: absolute; white-space: nowrap; line-height: 1; color: transparent;
+    font-family: var(--font-display); font-weight: 400; text-transform: uppercase;
+  }
+  .nogl .type span, .nogl .type li { color: var(--ink); }
+
+  .hud {
+    position: fixed; left: 0; right: 0; bottom: 0; z-index: 2;
+    display: flex; flex-wrap: wrap; justify-content: space-between; align-items: flex-end; gap: 10px;
+    padding: 16px; padding-bottom: calc(16px + env(safe-area-inset-bottom, 0px));
+    pointer-events: none;
+    font: 500 11px/1.4 var(--font-ui); letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted);
+  }
+  .hud > * { pointer-events: auto; }
+  .hint { margin: 0; }
+  .btns { display: flex; gap: 8px; }
+  .hud button {
+    font: inherit; letter-spacing: inherit; text-transform: inherit; color: var(--ink);
+    background: rgba(8, 10, 26, 0.6); border: 1px solid var(--line); border-radius: 999px;
+    padding: 7px 12px; cursor: pointer; -webkit-backdrop-filter: blur(6px); backdrop-filter: blur(6px);
+  }
+  .hud button:hover { border-color: rgba(160, 180, 255, 0.55); }
+  .hud button:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
+  .hud kbd { font: inherit; opacity: 0.55; margin-left: 6px; }
+  .tp-dfwv { z-index: 3 !important; top: calc(12px + env(safe-area-inset-top, 0px)) !important; }
+</style>
+<style>*,*::before,*::after{box-sizing:border-box}body{margin:0}</style>
+</head>
+<body>
+<canvas id="stage" aria-hidden="true"></canvas>
+
+<header class="type" id="type">
+  <h1><span id="l1">Content</span> <span id="l2">Universe</span></h1>
+  <ul>
+    <li id="t1">Sticky</li>
+    <li id="t2">Vertical</li>
+    <li id="t3">Media</li>
+  </ul>
+</header>
+
+<div class="hud">
+  <p class="hint" id="hint">Hover to stick, click to burst</p>
+  <div class="btns">
+    <button id="toggleType" type="button" aria-pressed="true">Hide type <kbd>T</kbd></button>
+    <button id="toggleCtl" type="button" aria-pressed="false">Controls <kbd>P</kbd></button>
+  </div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/tweakpane@3.1.10/dist/tweakpane.min.js"></script>
+<script>
+(() => {
+'use strict';
+
+/* ---------- parameters ---------- */
+const P = {
+  viscosity: 4.5, elasticity: 2.8, tension: 1.3, breathing: 2,
+  reach: 0.05, follow: 90, slide: 1.2, thickness: 1, snap: 25,
+  burstSize: 0.07, burstForce: 1.15,
+  refraction: 3, rim: 1, seeThrough: 0.36, smear: 1,
+  density: 0.95, brightness: 0.7, twinkle: 1, nebula: 1.45,
+  showType: true, maxDpr: 1.5,
+  cVoid: '#04050c', cBody: '#1b28c9', cDeep: '#080b45', cRim: '#a6ecff', cGlow: '#1a2c9a', cNeb: '#b97cff',
+  cStar1: '#f4f1ff', cStar2: '#6fe4ff', cStar3: '#a98bff', cStar4: '#5470ff'
+};
+const FONT = '"Anton", "Impact", "Arial Narrow", sans-serif';
+const $ = id => document.getElementById(id);
+const textEls = { line1: $('l1'), line2: $('l2'), tag1: $('t1'), tag2: $('t2'), tag3: $('t3') };
+const T = {};
+for (const k in textEls) T[k] = textEls[k].textContent.trim();
+
+const reduceMQ = matchMedia('(prefers-reduced-motion: reduce)');
+let reduce = reduceMQ.matches;
+reduceMQ.addEventListener && reduceMQ.addEventListener('change', e => { reduce = e.matches; });
+
+const clamp = (v, a, b) => Math.min(Math.max(v, a), b);
+const lerp = (a, b, t) => a + (b - a) * t;
+const smooth = (a, b, x) => { const t = clamp((x - a) / (b - a), 0, 1); return t * t * (3 - 2 * t); };
+const hex3 = h => { const n = parseInt(h.slice(1), 16); return [(n >> 16 & 255) / 255, (n >> 8 & 255) / 255, (n & 255) / 255]; };
+
+/* ---------- GL setup ---------- */
+const canvas = $('stage');
+const gl = canvas.getContext('webgl2', { antialias: false, alpha: false, depth: false, stencil: false, premultipliedAlpha: false, powerPreference: 'high-performance' });
+
+const VS = `#version 300 es
+in vec2 a; void main(){ gl_Position = vec4(a, 0.0, 1.0); }`;
+
+const FS = `#version 300 es
+precision highp float;
+uniform vec2 uRes; uniform float uScale; uniform float uTime; uniform float uDrift;
+uniform vec4 uEdge4[32]; uniform float uEdgeX0; uniform float uEdgeDX;
+uniform vec4 uStrand[8]; uniform float uStrandOn;
+uniform vec4 uDrops[16]; uniform int uDropN;
+uniform vec4 uHoles[6]; uniform int uHoleN;
+uniform vec4 uTrail[12]; uniform int uTrailN; uniform float uTrailR;
+uniform sampler2D uScene; uniform float uTextAmt;
+uniform vec2 uMouse; uniform vec2 uPar; uniform float uMouseOn;
+uniform float uRw, uRefr, uSee, uDensity, uBright, uTwinkle, uNebula, uK;
+uniform vec3 cVoid, cBody, cDeep, cRim, cGlow, cNeb, cS1, cS2, cS3, cS4;
+out vec4 outColor;
+
+float E(int i){ return uEdge4[i >> 2][i & 3]; }
+
+float edgeH(float x, out float dh){
+  float u = clamp((x - uEdgeX0) / uEdgeDX, 1.0, 125.999);
+  int i = int(u); float t = u - float(i);
+  float p0 = E(i - 1), p1 = E(i), p2 = E(i + 1), p3 = E(i + 2);
+  float a = -0.5*p0 + 1.5*p1 - 1.5*p2 + 0.5*p3;
+  float b = p0 - 2.5*p1 + 2.0*p2 - 0.5*p3;
+  float c = -0.5*p0 + 0.5*p2;
+  dh = (3.0*a*t*t + 2.0*b*t + c) / uEdgeDX;
+  return ((a*t + b)*t + c)*t + p1;
+}
+float smin(float a, float b, float k){ float h = max(k - abs(a - b), 0.0) / k; return min(a, b) - h*h*k*0.25; }
+float smax(float a, float b, float k){ return -smin(-a, -b, k); }
+
+float sdUC(vec2 p, vec2 pa, vec2 pb, float ra, float rb){
+  vec2 ba = pb - pa; float h = length(ba);
+  if (h < 0.5) return length(p - pa) - max(ra, rb);
+  vec2 dir = ba / h; vec2 q = p - pa;
+  q = vec2(abs(dot(q, vec2(dir.y, -dir.x))), dot(q, dir));
+  float b = (ra - rb) / h;
+  if (abs(b) > 0.98) return min(length(p - pa) - ra, length(p - pb) - rb);
+  float a = sqrt(1.0 - b*b);
+  float k = dot(q, vec2(-b, a));
+  if (k < 0.0) return length(q) - ra;
+  if (k > a*h) return length(q - vec2(0.0, h)) - rb;
+  return dot(q, vec2(a, b)) - ra;
+}
+
+float map(vec2 p){
+  float dh; float h = edgeH(p.x, dh);
+  float d = (p.y - h) / sqrt(1.0 + min(dh*dh, 9.0));
+  if (uStrandOn > 0.5){
+    float ds = 1e5;
+    for (int i = 0; i < 7; i++) ds = smin(ds, sdUC(p, uStrand[i].xy, uStrand[i+1].xy, uStrand[i].z, uStrand[i+1].z), 6.0);
+    d = smin(d, ds, uK);
+  }
+  for (int i = 0; i < 16; i++){ if (i >= uDropN) break; vec4 r = uDrops[i]; d = smin(d, length(p - r.xy) - r.z, uK*0.55); }
+  for (int i = 0; i < 6; i++){ if (i >= uHoleN) break; vec4 r = uHoles[i]; d = smax(d, r.z - length(p - r.xy), uK*0.7); }
+  return d;
+}
+
+float hash12(vec2 p){ vec3 p3 = fract(vec3(p.xyx) * 0.1031); p3 += dot(p3, p3.yzx + 33.33); return fract((p3.x + p3.y) * p3.z); }
+vec2 hash22(vec2 p){ vec3 p3 = fract(vec3(p.xyx) * vec3(0.1031, 0.1030, 0.0973)); p3 += dot(p3, p3.yzx + 33.33); return fract((p3.xx + p3.yz) * p3.zy); }
+float vn(vec2 p){ vec2 i = floor(p), f = fract(p); f = f*f*(3.0 - 2.0*f);
+  return mix(mix(hash12(i), hash12(i + vec2(1,0)), f.x), mix(hash12(i + vec2(0,1)), hash12(i + vec2(1,1)), f.x), f.y); }
+float fbm(vec2 p){ float s = 0.0, a = 0.5; for (int i = 0; i < 4; i++){ s += a*vn(p); p = p*2.03 + vec2(17.1, 9.2); a *= 0.5; } return s; }
+
+vec3 starLayer(vec2 q, float cell, float seed, float dens, float sizeK, float bright){
+  vec2 g = q / cell; vec2 id = floor(g); vec2 f = fract(g);
+  float e = hash12(id * 1.37 + seed * 11.0);
+  if (e > dens) return vec3(0.0);
+  vec2 h = hash22(id + seed * 17.0);
+  vec2 pos = 0.2 + 0.6 * h;
+  float dist = length(f - pos) * cell;
+  float r = hash12(id + seed * 3.1);
+  float size = (0.35 + 1.3 * r*r*r) * sizeK;
+  float a = exp(-dist*dist / (size*size));
+  float tw = mix(1.0, 0.4 + 0.6*sin(uTime*(0.8 + 2.6*h.x) + h.y*6.283), uTwinkle);
+  float c = fract(e * 7.31 + h.x);
+  vec3 col = c < 0.38 ? cS1 : c < 0.6 ? cS2 : c < 0.82 ? cS4 : cS3;
+  return col * a * max(tw, 0.0) * mix(0.35, 1.7, r*r) * bright;
+}
+
+vec4 sceneAt(vec2 pp, float lod){
+  return textureLod(uScene, vec2(pp.x / uRes.x, 1.0 - pp.y / uRes.y), lod) * uTextAmt;
+}
+
+void main(){
+  vec2 p = vec2(gl_FragCoord.x, uRes.y * uScale - gl_FragCoord.y) / uScale;
+  float minD = min(uRes.x, uRes.y);
+  float rw = uRw;
+  float t = uTime * uDrift;
+  float d = map(p);
+
+  /* the void */
+  vec3 bg = cVoid + cGlow * 0.09 * (1.0 - smoothstep(0.0, uRes.y, p.y));
+  vec4 sc = sceneAt(p, 0.0);
+  vec3 outside = bg * (1.0 - sc.a) + sc.rgb;
+  float dd = max(d, 0.0);
+  outside *= 1.0 - 0.55 * exp(-dd / (rw * 1.4));
+  outside += cGlow * 0.5 * exp(-dd / (rw * 4.0));
+  vec3 col = outside;
+
+  if (d < 1.5){
+    float s = max(-d, 0.0);
+    vec2 g = vec2(0.0, 1.0);
+    if (s < rw * 1.5){
+      vec2 e = vec2(1.0, 0.0);
+      g = vec2(map(p + e.xy) - map(p - e.xy), map(p + e.yx) - map(p - e.yx));
+      float gLen = length(g); g = gLen > 1e-5 ? g / gLen : vec2(0.0, 1.0);
+    }
+    float m = clamp(1.0 - s / rw, 0.0, 1.0);
+    vec2 wob = vec2(fbm(p*0.0045 + vec2(t*0.04, 0.0)), fbm(p*0.0045 + vec2(5.2, -t*0.035))) - 0.5;
+    vec3 n = normalize(vec3(g * m + wob * 0.35 * (1.0 - m), sqrt(max(1.0 - m*m, 0.0)) + 0.02));
+
+    /* what's behind, bent through the goo */
+    vec2 off = -n.xy * uRefr * rw * 1.8;
+    float lod = mix(2.8, 0.3, m*m);
+    vec4 sR = sceneAt(p + off, lod);
+    float sG = sceneAt(p + off * 1.18, lod).g;
+    float sB = sceneAt(p + off * 1.36, lod).b;
+    vec3 refr = vec3(sR.r, sG, sB);
+    float see = mix(uSee, 0.85, pow(m, 1.5));
+
+    float depth = smoothstep(0.0, minD * 0.45, s);
+    float nb = fbm(p*0.003 + vec2(t*0.012, -t*0.008));
+    vec3 body = mix(cBody, cDeep, clamp(0.25 + depth*0.6 + (nb - 0.5)*0.9, 0.0, 1.0));
+    vec3 ins = body * (1.0 - 0.55*m) * (1.0 - sR.a*see*0.5) + refr * vec3(0.62, 0.74, 1.0) * see;
+
+    /* the space inside: smeared by the cursor, blown by bursts, lensed at the rim */
+    vec2 q = p;
+    for (int i = 0; i < 12; i++){ if (i >= uTrailN) break; vec4 tr = uTrail[i]; vec2 dv = p - tr.xy; q -= tr.zw * exp(-dot(dv, dv) / (uTrailR*uTrailR)); }
+    for (int i = 0; i < 6; i++){ if (i >= uHoleN) break; vec4 hl = uHoles[i]; vec2 dv = p - hl.xy; float dl = length(dv) + 1e-3;
+      q -= dv / dl * hl.z * 0.9 * exp(-max(dl - hl.z, 0.0) / (hl.z*0.6 + 1.0)); }
+    q -= n.xy * rw * 1.4 * m;
+
+    float boost = 1.0 + 1.9 * exp(-s / (rw * 3.0));
+    vec2 drift = vec2(2.0, -1.1) * t;
+    vec3 stars = starLayer(q + uPar*5.0  + drift*0.6, 3.3, 1.0, 0.55*uDensity*boost, 0.85, 0.55)
+               + starLayer(q + uPar*12.0 + drift,     5.4, 2.0, 0.42*uDensity*boost, 1.05, 0.95)
+               + starLayer(q + uPar*24.0 + drift*1.7, 9.5, 3.0, 0.30*uDensity*boost, 1.45, 1.35);
+
+    float band = exp(-pow((q.x*0.55 + q.y - uRes.x*0.62) / (minD*0.22), 2.0));
+    float neb = smoothstep(0.42, 0.82, fbm(q*0.0022 + vec2(t*0.01, t*0.006))) * mix(0.35, 1.0, band) * uNebula;
+    ins += cNeb * neb * 0.32;
+    stars *= 1.0 + neb * 1.4;
+    stars = mix(stars, stars * (cNeb*0.6 + 0.6), neb*0.5);
+    ins += stars * uBright * mix(1.0, 1.7, exp(-s / (rw*2.5)));
+    ins += mix(cS2, cNeb, 0.35) * exp(-s / (rw*2.0)) * 0.2;
+
+    /* glassy lip */
+    vec3 L1 = normalize(vec3(-0.45, -0.75, 0.5));
+    float sp1 = pow(max(dot(n, normalize(L1 + vec3(0.0, 0.0, 1.0))), 0.0), 60.0);
+    vec2 toM = (uMouse - p) / (minD * 0.45);
+    float sp2 = pow(max(dot(n, normalize(normalize(vec3(toM, 0.55)) + vec3(0.0, 0.0, 1.0))), 0.0), 36.0) * uMouseOn * exp(-dot(toM, toM)*0.6);
+    float fres = pow(1.0 - n.z, 2.2);
+    float ang = atan(g.y, g.x);
+    vec3 irid = mix(vec3(0.12, 0.95, 0.72), vec3(0.25, 0.62, 1.0), 0.5 + 0.5*sin(ang*1.7 + s*0.25 + t*0.4));
+    irid = mix(irid, cRim, 0.35);
+    ins += irid * fres * 0.6;
+    ins += cRim * (sp1*1.1 + sp2*0.9);
+    ins *= 1.0 - 0.28 * exp(-pow((s - rw*0.62) / (rw*0.2), 2.0));
+    ins += cRim * exp(-pow((s - 1.0) / 1.1, 2.0)) * 0.85;
+
+    col = mix(outside, ins, smoothstep(0.9, -0.9, d));
+  }
+
+  vec2 vu = p / uRes - 0.5;
+  col *= 1.0 - 0.3 * dot(vu, vu);
+  col += (hash12(gl_FragCoord.xy + fract(uTime) * 91.0) - 0.5) / 170.0;
+  outColor = vec4(col, 1.0);
+}`;
+
+function fail(msg) {
+  document.documentElement.classList.add('nogl');
+  $('hint').textContent = msg;
+  console.error(msg);
+}
+
+let prog = null, U = {};
+if (!gl) { fail('This needs WebGL2, which this browser has turned off'); }
+else {
+  const sh = (type, src) => { const s = gl.createShader(type); gl.shaderSource(s, src); gl.compileShader(s);
+    if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) { console.error(gl.getShaderInfoLog(s)); return null; } return s; };
+  const vs = sh(gl.VERTEX_SHADER, VS), fs = sh(gl.FRAGMENT_SHADER, FS);
+  prog = gl.createProgram();
+  if (vs && fs) { gl.attachShader(prog, vs); gl.attachShader(prog, fs); gl.bindAttribLocation(prog, 0, 'a'); gl.linkProgram(prog); }
+  if (!vs || !fs || !gl.getProgramParameter(prog, gl.LINK_STATUS)) { console.error(gl.getProgramInfoLog(prog)); prog = null; fail('The shader failed to compile on this GPU'); }
+}
+
+/* ---------- state ---------- */
+const N = 128, STEP = 1 / 120;
+const edge = { h: new Float32Array(N), v: new Float32Array(N), rest: new Float32Array(N), x0: 0, dx: 1 };
+let W = 1, H = 1, minD = 1, rScale = 1, quality = 1, time = 0, textAmt = 1;
+const L = {};
+const S = { on: false, attached: false, retract: false, rt: 0, ax: 0, L: 0, cooldown: 0,
+  pts: Array.from({ length: 8 }, () => ({ x: 0, y: 0, px: 0, py: 0, r: 0 })), tip: { x: 0, y: 0, vx: 0, vy: 0 } };
+const drops = [], holes = [], trail = [];
+const ptr = { x: -1e4, y: -1e4, active: false, touching: false, vx: 0, vy: 0, lx: 0, ly: 0, downT: 0, downX: 0, downY: 0 };
+const look = { mx: 0, my: 0, on: 0, px: 0, py: 0 };
+let colors = {};
+
+/* ---------- type: DOM is the source, drawn into a texture ---------- */
+const scene = document.createElement('canvas');
+const sctx = scene.getContext('2d');
+let sceneTex = null;
+
+function layoutType() {
+  sctx.setTransform(1, 0, 0, 1, 0, 0);
+  sctx.font = `100px ${FONT}`;
+  sctx.textAlign = 'left'; sctx.textBaseline = 'alphabetic';
+  const capR = sctx.measureText('H').actualBoundingBoxAscent / 100 || 0.73;
+  const ink = s => { const m = sctx.measureText(s || ' '); return { w: Math.max(1, m.actualBoundingBoxLeft + m.actualBoundingBoxRight), l: m.actualBoundingBoxLeft }; };
+  const t1 = T.line1.toUpperCase(), t2 = T.line2.toUpperCase();
+  const portrait = H > W * 1.05;
+  let textW = W * (portrait ? 0.86 : 0.8);
+  const i1 = ink(t1), i2 = ink(t2);
+  let f1 = 100 * textW / i1.w, f2 = 100 * textW / i2.w;
+  let c1 = capR * f1, c2 = capR * f2;
+  const gapK = 0.045;
+  let total = c1 * (1 + gapK) + c2 * 1.42;
+  const top0 = H * (portrait ? 0.2 : 0.17), avail = H * 0.92 - top0;
+  if (total > avail) { const k = avail / total; f1 *= k; f2 *= k; c1 *= k; c2 *= k; textW *= k; total = avail; }
+  const left = (W - textW) / 2;
+  const topC = top0 + (avail - total) * (portrait ? 0.55 : 0.5);
+  Object.assign(L, { capR, t1, t2, i1, i2, f1, f2, c1, c2, left, textW, topC, topU: topC + c1 * (1 + gapK) });
+  L.capC = c1;
+  L.gooBase = topC - 0.22 * c1;
+
+  // keep the real text roughly where it's drawn (screen readers, find-in-page)
+  const place = (el, x, capTop, size) => { Object.assign(el.style, { left: x + 'px', top: (capTop - size * 0.2) + 'px', fontSize: size + 'px' }); };
+  place(textEls.line1, left, topC, f1);
+  place(textEls.line2, left, L.topU, f2);
+  const fL = Math.max(10, 0.11 * c2 / capR);
+  const labTop = L.topU + c2 + 0.075 * c2;
+  place(textEls.tag1, left, labTop, fL);
+  place(textEls.tag2, W / 2 - 40, labTop, fL);
+  place(textEls.tag3, left + textW - 60, labTop, fL);
+}
+
+function drawScene() {
+  const w = Math.max(1, Math.round(W * rScale)), h = Math.max(1, Math.round(H * rScale));
+  if (scene.width !== w || scene.height !== h) { scene.width = w; scene.height = h; }
+  const c = sctx;
+  c.setTransform(rScale, 0, 0, rScale, 0, 0);
+  c.clearRect(0, 0, W, H);
+  const { left, textW, topC, topU, c1, c2, f1, f2, i1, i2, capR } = L;
+  const botU = topU + c2;
+
+  // bar
+  const by0 = topU + c2 * 0.72, by1 = botU + c2 * 0.4;
+  const bg = c.createLinearGradient(0, by0, 0, by1);
+  bg.addColorStop(0, '#090c1d'); bg.addColorStop(0.45, '#101850'); bg.addColorStop(1, '#2448ff');
+  c.fillStyle = bg; c.fillRect(W * 0.03, by0, W * 0.94, by1 - by0);
+
+  c.textBaseline = 'alphabetic'; c.textAlign = 'left';
+  c.font = `${f1}px ${FONT}`;
+  const g1 = c.createLinearGradient(0, topC, 0, topC + c1);
+  g1.addColorStop(0, '#7392ec'); g1.addColorStop(0.55, '#3b5df7'); g1.addColorStop(1, '#2649ff');
+  c.fillStyle = g1; c.fillText(L.t1, left + i1.l * f1 / 100, topC + c1);
+
+  c.font = `${f2}px ${FONT}`;
+  const g2 = c.createLinearGradient(0, topU, 0, botU);
+  g2.addColorStop(0, '#f3f5f8'); g2.addColorStop(1, '#cbd6df');
+  c.fillStyle = g2; c.fillText(L.t2, left + i2.l * f2 / 100, botU);
+
+  const fL = Math.max(10, 0.11 * c2 / capR);
+  const base = botU + 0.075 * c2 + capR * fL;
+  c.font = `${fL}px ${FONT}`; c.fillStyle = '#dce3ea';
+  c.textAlign = 'left'; c.fillText(T.tag1.toUpperCase(), left, base);
+  c.textAlign = 'center'; c.fillText(T.tag2.toUpperCase(), W / 2, base);
+  c.textAlign = 'right'; c.fillText(T.tag3.toUpperCase(), left + textW, base);
+
+  if (!gl || !prog) return;
+  if (!sceneTex) sceneTex = gl.createTexture();
+  gl.activeTexture(gl.TEXTURE0);
+  gl.bindTexture(gl.TEXTURE_2D, sceneTex);
+  gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
+  gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, true);
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, scene);
+  gl.generateMipmap(gl.TEXTURE_2D);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR_MIPMAP_LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+}
+
+/* ---------- the goo ---------- */
+function restAt(x, t) {
+  const u = x / W, c = L.capC, b = P.breathing * (reduce ? 0.15 : 1);
+  const dipC = 0.6 + 0.035 * Math.sin(t * 0.13);
+  let y = L.gooBase;
+  y += c * 0.85 * (1 + 0.1 * b * Math.sin(t * 0.27)) * Math.exp(-(((u - dipC) / 0.12) ** 2));
+  y += c * 0.2 * Math.exp(-(((u - 0.13) / 0.09) ** 2));
+  y += c * 0.18 * Math.exp(-(((u - 0.93) / 0.08) ** 2));
+  y += b * c * 0.1 * (0.6 * Math.sin(u * 6.3 + t * 0.33) + 0.4 * Math.sin(u * 11.7 - t * 0.47 + 1.7));
+  const wander = 0.5 + 0.42 * Math.sin(t * 0.061);
+  y += b * c * 0.22 * Math.exp(-(((u - wander) / 0.06) ** 2)) * (0.5 + 0.5 * Math.sin(t * 0.17));
+  return Math.max(y, 16);
+}
+function edgeAt(x) {
+  const u = clamp((x - edge.x0) / edge.dx, 0, N - 1.001), i = Math.floor(u), f = u - i;
+  return edge.h[i] * (1 - f) + edge.h[i + 1] * f;
+}
+function resetEdge(fromAbove) {
+  for (let i = 0; i < N; i++) {
+    const x = edge.x0 + i * edge.dx;
+    edge.h[i] = restAt(x, time) - (fromAbove ? L.capC * 1.1 + 40 : 0);
+    edge.v[i] = 0;
+  }
+}
+
+function stepEdge(dt) {
+  const kR = P.elasticity, damp = P.viscosity;
+  const c2 = (0.07 * W * P.tension) ** 2 / (edge.dx * edge.dx);
+  const pullOn = S.on && S.attached && !S.retract;
+  const pullAmt = pullOn ? 1.3 * Math.min(S.L, 0.22 * H) : 0;
+  const pw = 0.075 * W;
+  for (let i = 0; i < N; i++) edge.rest[i] = restAt(edge.x0 + i * edge.dx, time);
+  for (let i = 0; i < N; i++) {
+    const x = edge.x0 + i * edge.dx, h = edge.h[i];
+    const hl = edge.h[i > 0 ? i - 1 : 0], hr = edge.h[i < N - 1 ? i + 1 : N - 1];
+    let a = kR * (edge.rest[i] - h) + c2 * (hl + hr - 2 * h) - damp * edge.v[i];
+    if (pullAmt) a += pullAmt * kR * 0.25 * Math.exp(-(((x - S.ax) / pw) ** 2));
+    edge.v[i] += a * dt;
+  }
+  for (let i = 0; i < N; i++) edge.h[i] += edge.v[i] * dt;
+}
+
+function spawnDrop(x, y, vx, vy, r) {
+  if (r < 2) return;
+  drops.push({ x, y, vx, vy, r0: r, r, age: 0, life: 4.5 + Math.random() * 2, seed: Math.random() * 6.28 });
+  while (drops.length > 16) drops.shift();
+}
+
+function attach() {
+  S.on = true; S.attached = true; S.retract = false; S.rt = 0; S.ax = ptr.x;
+  const ay = edgeAt(S.ax);
+  for (const p of S.pts) { p.x = p.px = S.ax; p.y = p.py = ay; p.r = 0; }
+  Object.assign(S.tip, { x: S.ax, y: ay, vx: 0, vy: 0 });
+}
+function snapStrand(push) {
+  const L0 = 0.1 * minD, snapLen = snapLength();
+  const st = clamp((S.L - L0) / (snapLen - L0), 0, 1);
+  const tip = S.tip, k = push ? 1 : 0.35;
+  let vx = tip.vx * k, vy = tip.vy * k;
+  if (push) { const dx = tip.x - push.x, dy = tip.y - push.y, dl = Math.hypot(dx, dy) || 1; vx += dx / dl * 420; vy += dy / dl * 420; }
+  spawnDrop(tip.x, tip.y, vx, vy, S.pts[7].r);
+  const sp = S.pts[5];
+  spawnDrop(sp.x, sp.y, (sp.x - sp.px) / STEP * 0.5 + vx * 0.3, (sp.y - sp.py) / STEP * 0.5 + vy * 0.3, Math.max(sp.r, S.pts[7].r * 0.3) * 0.75);
+  S.attached = false; S.retract = true; S.rt = 0; S.cooldown = 0.35;
+  const pw = 0.08 * W;
+  for (let i = 0; i < N; i++) {
+    const x = edge.x0 + i * edge.dx;
+    edge.v[i] -= (120 + 260 * st) * Math.exp(-(((x - S.ax) / pw) ** 2));
+  }
+}
+function release() {
+  if (!S.attached) return;
+  if (S.L > 0.45 * snapLength()) snapStrand(null);
+  else { S.attached = false; S.retract = true; S.rt = 0; }
+}
+const snapLength = () => Math.max(0.15 * minD, P.snap / 100 * H);
+
+function stepStrand(dt) {
+  if (S.cooldown > 0) S.cooldown -= dt;
+  const reach = P.reach * minD;
+  if (ptr.active && !S.attached && S.cooldown <= 0 && !(S.on && !S.retract)) {
+    if (ptr.y - edgeAt(ptr.x) < reach && ptr.x > -50 && ptr.x < W + 50) attach();
+  }
+  if (!S.on) return;
+  const rA0 = P.thickness * 0.055 * minD, rT0 = P.thickness * 0.032 * minD;
+  const inside = ptr.y < edgeAt(ptr.x) - 2;
+  if (S.attached) {
+    const rate = inside ? 16 : P.slide;
+    S.ax += (ptr.x - S.ax) * (1 - Math.exp(-rate * dt));
+  }
+  const a = S.pts[0];
+  a.x = a.px = S.ax; a.y = a.py = edgeAt(S.ax) - rA0 * 0.45;
+  const tip = S.tip;
+  if (S.retract) {
+    S.rt += dt;
+    const k = 1 - Math.exp(-10 * dt);
+    tip.x += (a.x - tip.x) * k; tip.y += (a.y - tip.y) * k; tip.vx = tip.vy = 0;
+    for (let i = 1; i < 7; i++) { const p = S.pts[i]; p.x += (a.x - p.x) * k; p.y += (a.y - p.y) * k; p.px = p.x; p.py = p.y; }
+    if (S.rt > 0.55) { S.on = false; S.retract = false; }
+  } else {
+    let tx = ptr.x, ty = ptr.y;
+    if (inside) { tx = a.x; ty = a.y; }
+    const k = P.follow, c = 2 * Math.sqrt(k) * 0.75;
+    tip.vx += ((tx - tip.x) * k - tip.vx * c) * dt;
+    tip.vy += ((ty - tip.y) * k - tip.vy * c) * dt;
+    tip.x += tip.vx * dt; tip.y += tip.vy * dt;
+    for (let i = 1; i < 7; i++) {
+      const p = S.pts[i];
+      const vx = (p.x - p.px) * 0.96, vy = (p.y - p.py) * 0.96;
+      p.px = p.x; p.py = p.y; p.x += vx; p.y += vy + 40 * dt * dt;
+    }
+  }
+  const last = S.pts[7]; last.x = tip.x; last.y = tip.y;
+  const len = Math.hypot(tip.x - a.x, tip.y - a.y);
+  if (!S.retract) {
+    const seg = len * 1.06 / 7;
+    for (let it = 0; it < 6; it++) {
+      for (let i = 0; i < 7; i++) {
+        const p1 = S.pts[i], p2 = S.pts[i + 1];
+        const dx = p2.x - p1.x, dy = p2.y - p1.y, dist = Math.hypot(dx, dy) || 1e-4;
+        const diff = (dist - seg) / dist;
+        const w1 = i === 0 ? 0 : (i + 1 === 7 ? 1 : 0.5), w2 = i + 1 === 7 ? 0 : (i === 0 ? 1 : 0.5);
+        p1.x += dx * diff * w1; p1.y += dy * diff * w1;
+        p2.x -= dx * diff * w2; p2.y -= dy * diff * w2;
+      }
+    }
+  }
+  S.L = len;
+  const L0 = 0.1 * minD, snapLen = snapLength();
+  const st = clamp((len - L0) / (snapLen - L0), 0, 1);
+  const appear = smooth(0, 0.6 * L0, len);
+  const fade = S.retract ? 1 - smooth(0, 0.5, S.rt) : 1;
+  for (let i = 0; i < 8; i++) {
+    const s = i / 7;
+    const base = lerp(rA0 * (1 - 0.35 * st), rT0 * (1 - 0.1 * st), smooth(0, 1, s));
+    const pinch = 1 - 0.9 * Math.pow(st, 0.8) * Math.exp(-(((s - 0.6) / 0.24) ** 2));
+    S.pts[i].r = base * pinch * appear * fade * (i === 7 ? 1.1 : 1);
+  }
+  if (S.attached && len > snapLen) snapStrand(null);
+}
+
+function stepDrops(dt) {
+  for (let i = drops.length - 1; i >= 0; i--) {
+    const d = drops[i];
+    d.age += dt;
+    const damp = Math.exp(-0.45 * dt);
+    d.vx = d.vx * damp + Math.sin(d.age * 1.7 + d.seed) * 6 * dt;
+    d.vy = d.vy * damp + Math.cos(d.age * 1.3 + d.seed) * 6 * dt + 4 * dt;
+    d.x += d.vx * dt; d.y += d.vy * dt;
+    d.r = d.r0 * (1 - smooth(0.45, 1, d.age / d.life)) * (1 + 0.04 * Math.sin(d.age * 5 + d.seed));
+    if (d.age > d.life) drops.splice(i, 1);
+  }
+  for (let i = holes.length - 1; i >= 0; i--) {
+    const h = holes[i];
+    h.age += dt;
+    const Rm = P.burstSize * minD;
+    h.R = Rm * (1 - Math.exp(-h.age * 22)) * (1 - smooth(0.12, 1.25, h.age)) * (1 + 0.05 * Math.sin(h.age * 18) * Math.exp(-h.age * 3));
+    if (h.age > 1.35) holes.splice(i, 1);
+  }
+}
+
+function burst(x, y) {
+  holes.push({ x, y, age: 0, R: 0 });
+  while (holes.length > 6) holes.shift();
+  const Rm = P.burstSize * minD, f = P.burstForce;
+  for (let i = 0; i < N; i++) {
+    const nx = edge.x0 + i * edge.dx, dy = edge.h[i] - y;
+    const w = Math.exp(-((Math.hypot(nx - x, dy) / (Rm * 1.7)) ** 2));
+    edge.v[i] += dy / (Math.abs(dy) + Rm * 0.6) * f * 650 * w;
+  }
+  for (const d of drops) {
+    const dx = d.x - x, dy = d.y - y, dl = Math.hypot(dx, dy) || 1;
+    const w = Math.exp(-((dl / (Rm * 2.2)) ** 2));
+    d.vx += dx / dl * 520 * f * w; d.vy += dy / dl * 520 * f * w;
+  }
+  if (S.attached) {
+    if (S.L > 0.06 * minD) snapStrand({ x, y });
+    else { S.attached = false; S.retract = true; S.rt = 0; }
+    S.cooldown = 0.45;
+  }
+}
+
+function step(dt) {
+  time += dt;
+  stepEdge(dt);
+  stepStrand(dt);
+  stepDrops(dt);
+}
+
+/* ---------- sizing ---------- */
+let first = true;
+function resize() {
+  const oldH = H;
+  W = Math.max(1, window.innerWidth); H = Math.max(1, window.innerHeight); minD = Math.min(W, H);
+  rScale = Math.min(window.devicePixelRatio || 1, P.maxDpr) * quality;
+  canvas.width = Math.max(1, Math.round(W * rScale));
+  canvas.height = Math.max(1, Math.round(H * rScale));
+  edge.x0 = -0.06 * W; edge.dx = 1.12 * W / (N - 1);
+  layoutType();
+  if (first) { resetEdge(!reduce); first = false; }
+  else if (oldH > 1) { const k = H / oldH; for (let i = 0; i < N; i++) edge.h[i] *= k; }
+  drawScene();
+}
+
+/* ---------- render ---------- */
+const vb = gl && prog ? gl.createBuffer() : null;
+const buf = { strand: new Float32Array(32), drops: new Float32Array(64), holes: new Float32Array(24), trail: new Float32Array(48) };
+function refreshColors() {
+  colors = {};
+  for (const k of ['cVoid', 'cBody', 'cDeep', 'cRim', 'cGlow', 'cNeb']) colors[k] = hex3(P[k]);
+  colors.cS1 = hex3(P.cStar1); colors.cS2 = hex3(P.cStar2); colors.cS3 = hex3(P.cStar3); colors.cS4 = hex3(P.cStar4);
+}
+if (gl && prog) {
+  gl.bindBuffer(gl.ARRAY_BUFFER, vb);
+  gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 3, -1, -1, 3]), gl.STATIC_DRAW);
+  gl.enableVertexAttribArray(0);
+  gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
+  const n = gl.getProgramParameter(prog, gl.ACTIVE_UNIFORMS);
+  for (let i = 0; i < n; i++) { const info = gl.getActiveUniform(prog, i); const name = info.name.replace(/\[0\]$/, ''); U[name] = gl.getUniformLocation(prog, info.name); }
+}
+function render(rdt) {
+  gl.viewport(0, 0, canvas.width, canvas.height);
+  gl.useProgram(prog);
+  const u = U;
+  gl.uniform2f(u.uRes, W, H);
+  gl.uniform1f(u.uScale, canvas.width / W);
+  gl.uniform1f(u.uTime, time);
+  gl.uniform1f(u.uDrift, reduce ? 0.15 : 1);
+  gl.uniform4fv(u.uEdge4, edge.h);
+  gl.uniform1f(u.uEdgeX0, edge.x0);
+  gl.uniform1f(u.uEdgeDX, edge.dx);
+
+  let maxR = 0;
+  S.pts.forEach((p, i) => { buf.strand.set([p.x, p.y, p.r, 0], i * 4); maxR = Math.max(maxR, p.r); });
+  gl.uniform4fv(u.uStrand, buf.strand);
+  gl.uniform1f(u.uStrandOn, S.on && maxR > 0.5 ? 1 : 0);
+
+  let nd = 0;
+  for (const d of drops) { if (d.r > 0.5) { buf.drops.set([d.x, d.y, d.r, 0], nd * 4); nd++; } }
+  gl.uniform4fv(u.uDrops, buf.drops); gl.uniform1i(u.uDropN, nd);
+
+  let nh = 0;
+  for (const h of holes) { if (h.R > 0.5) { buf.holes.set([h.x, h.y, h.R, 0], nh * 4); nh++; } }
+  gl.uniform4fv(u.uHoles, buf.holes); gl.uniform1i(u.uHoleN, nh);
+
+  let nt = 0;
+  for (const tr of trail) {
+    const life = 1 - tr.age / 0.8; if (life <= 0) continue;
+    const k = P.smear * 0.045 * life * life;
+    let dx = tr.vx * k, dy = tr.vy * k; const m = Math.hypot(dx, dy);
+    if (m > 70) { dx *= 70 / m; dy *= 70 / m; }
+    buf.trail.set([tr.x, tr.y, dx, dy], nt * 4); nt++; if (nt >= 12) break;
+  }
+  gl.uniform4fv(u.uTrail, buf.trail); gl.uniform1i(u.uTrailN, nt);
+  gl.uniform1f(u.uTrailR, 0.07 * minD);
+
+  gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, sceneTex);
+  gl.uniform1i(u.uScene, 0);
+  gl.uniform1f(u.uTextAmt, textAmt);
+  gl.uniform2f(u.uMouse, look.mx, look.my);
+  gl.uniform2f(u.uPar, look.px, look.py);
+  gl.uniform1f(u.uMouseOn, look.on);
+  gl.uniform1f(u.uRw, clamp(minD * 0.022, 10, 34) * P.rim);
+  gl.uniform1f(u.uRefr, P.refraction);
+  gl.uniform1f(u.uSee, P.seeThrough);
+  gl.uniform1f(u.uDensity, P.density);
+  gl.uniform1f(u.uBright, P.brightness);
+  gl.uniform1f(u.uTwinkle, P.twinkle * (reduce ? 0.2 : 1));
+  gl.uniform1f(u.uNebula, P.nebula);
+  gl.uniform1f(u.uK, 0.06 * minD);
+  for (const k in colors) gl.uniform3fv(u[k], colors[k]);
+  gl.drawArrays(gl.TRIANGLES, 0, 3);
+}
+
+/* ---------- loop ---------- */
+let raf = 0, last = 0, acc = 0, trailClock = 0, frameAvg = 16.7, frames = 0;
+function frame(now) {
+  raf = requestAnimationFrame(frame);
+  const raw = last ? now - last : 16.7;
+  const dt = Math.min(raw / 1000, 0.05); last = now;
+  acc += dt;
+  let guard = 0;
+  while (acc >= STEP && guard++ < 8) { step(STEP); acc -= STEP; }
+  if (guard >= 8) acc = 0;
+
+  // pointer velocity, trail, smoothed look
+  if (ptr.active) {
+    const ivx = (ptr.x - ptr.lx) / Math.max(dt, 1e-3), ivy = (ptr.y - ptr.ly) / Math.max(dt, 1e-3);
+    ptr.vx = lerp(ptr.vx, ivx, 0.35); ptr.vy = lerp(ptr.vy, ivy, 0.35);
+    trailClock += dt;
+    if (trailClock > 0.03) { trailClock = 0; trail.unshift({ x: ptr.x, y: ptr.y, vx: ptr.vx, vy: ptr.vy, age: 0 }); if (trail.length > 12) trail.pop(); }
+  }
+  ptr.lx = ptr.x; ptr.ly = ptr.y;
+  for (const tr of trail) tr.age += dt;
+  const kL = 1 - Math.exp(-6 * dt);
+  if (ptr.active) { look.mx = lerp(look.mx, ptr.x, 1 - Math.exp(-14 * dt)); look.my = lerp(look.my, ptr.y, 1 - Math.exp(-14 * dt)); }
+  look.on = lerp(look.on, ptr.active ? 1 : 0, kL);
+  const tpx = ptr.active ? (ptr.x / W - 0.5) * 2 : 0, tpy = ptr.active ? (ptr.y / H - 0.5) * 2 : 0;
+  const kP = 1 - Math.exp(-2 * dt);
+  look.px = lerp(look.px, reduce ? 0 : tpx, kP); look.py = lerp(look.py, reduce ? 0 : tpy, kP);
+  textAmt = lerp(textAmt, P.showType ? 1 : 0, 1 - Math.exp(-7 * dt));
+
+  render(dt);
+
+  // drop resolution if the GPU is struggling
+  frameAvg = lerp(frameAvg, raw, 0.05); frames++;
+  if (frames > 90 && frameAvg > 26 && quality > 0.55) { quality *= 0.85; frames = 0; frameAvg = 16.7; resize(); }
+}
+function start() { if (!raf && gl && prog) { last = 0; raf = requestAnimationFrame(frame); } }
+function stop() { if (raf) { cancelAnimationFrame(raf); raf = 0; } }
+document.addEventListener('visibilitychange', () => (document.hidden ? stop() : start()));
+
+/* ---------- input ---------- */
+const isUI = e => !!(e.target && e.target.closest && e.target.closest('.hud, .tp-dfwv'));
+window.addEventListener('pointermove', e => {
+  if (e.pointerType === 'touch' && !ptr.touching) return;
+  ptr.x = e.clientX; ptr.y = e.clientY;
+  ptr.active = e.pointerType === 'touch' ? true : !isUI(e);
+  if (!ptr.active) release();
+}, { passive: true });
+window.addEventListener('pointerdown', e => {
+  if (isUI(e)) return;
+  ptr.x = ptr.lx = e.clientX; ptr.y = ptr.ly = e.clientY;
+  if (e.pointerType === 'touch') {
+    ptr.touching = true; ptr.active = true; ptr.downT = performance.now(); ptr.downX = e.clientX; ptr.downY = e.clientY;
+  } else if (e.button === 0) {
+    ptr.active = true; burst(e.clientX, e.clientY);
+  }
+});
+const touchEnd = e => {
+  if (e.pointerType !== 'touch' || !ptr.touching) return;
+  const quick = performance.now() - ptr.downT < 260 && Math.hypot(e.clientX - ptr.downX, e.clientY - ptr.downY) < 12;
+  ptr.touching = false; ptr.active = false;
+  if (quick) { S.attached && (S.attached = false, S.retract = true, S.rt = 0); burst(e.clientX, e.clientY); }
+  else release();
+};
+window.addEventListener('pointerup', touchEnd);
+window.addEventListener('pointercancel', touchEnd);
+document.addEventListener('mouseout', e => { if (!e.relatedTarget) { ptr.active = false; release(); } });
+window.addEventListener('blur', () => { ptr.active = false; release(); });
+
+/* ---------- controls ---------- */
+let pane = null;
+const typeBtn = $('toggleType'), ctlBtn = $('toggleCtl');
+function syncTypeBtn() {
+  typeBtn.firstChild.textContent = P.showType ? 'Hide type ' : 'Show type ';
+  typeBtn.setAttribute('aria-pressed', String(P.showType));
+}
+function toggleType() { P.showType = !P.showType; syncTypeBtn(); pane && pane.refresh(); }
+function togglePane() {
+  if (!pane) return;
+  pane.hidden = !pane.hidden;
+  ctlBtn.setAttribute('aria-pressed', String(!pane.hidden));
+}
+typeBtn.addEventListener('click', toggleType);
+ctlBtn.addEventListener('click', togglePane);
+window.addEventListener('keydown', e => {
+  if (e.target && /INPUT|TEXTAREA|SELECT/.test(e.target.tagName)) return;
+  if (e.metaKey || e.ctrlKey || e.altKey) return;
+  const k = e.key.toLowerCase();
+  if (k === 'p') togglePane();
+  else if (k === 't') toggleType();
+});
+
+let lastDpr = P.maxDpr;
+function onPaneChange() {
+  refreshColors();
+  syncTypeBtn();
+  let relayout = false;
+  for (const k in textEls) if (textEls[k].textContent !== T[k]) { textEls[k].textContent = T[k]; relayout = true; }
+  if (P.maxDpr !== lastDpr) { lastDpr = P.maxDpr; quality = 1; resize(); return; }
+  if (relayout) { layoutType(); drawScene(); }
+}
+function setupPane() {
+  if (!window.Tweakpane) { ctlBtn.hidden = true; return; }
+  pane = new Tweakpane.Pane({ title: 'Cosmic Jam' });
+  pane.hidden = true;
+  const goo = pane.addFolder({ title: 'Goo' });
+  goo.addInput(P, 'viscosity', { min: 0.5, max: 8, step: 0.1 });
+  goo.addInput(P, 'elasticity', { min: 1, max: 20, step: 0.1 });
+  goo.addInput(P, 'tension', { label: 'surface tension', min: 0.2, max: 3, step: 0.05 });
+  goo.addInput(P, 'breathing', { min: 0, max: 3, step: 0.05 });
+  const st = pane.addFolder({ title: 'Stickiness' });
+  st.addInput(P, 'reach', { label: 'grab reach', min: 0.02, max: 0.4, step: 0.01 });
+  st.addInput(P, 'follow', { label: 'follow speed', min: 4, max: 160, step: 1 });
+  st.addInput(P, 'slide', { label: 'anchor slide', min: 0, max: 6, step: 0.1 });
+  st.addInput(P, 'thickness', { label: 'strand thickness', min: 0.4, max: 2.2, step: 0.05 });
+  st.addInput(P, 'snap', { label: 'snap distance %', min: 10, max: 150, step: 1 });
+  st.addInput(P, 'smear', { label: 'interior smear', min: 0, max: 3, step: 0.05 });
+  const bu = pane.addFolder({ title: 'Burst' });
+  bu.addInput(P, 'burstSize', { label: 'hole size', min: 0.04, max: 0.35, step: 0.01 });
+  bu.addInput(P, 'burstForce', { label: 'force', min: 0, max: 3, step: 0.05 });
+  const lk = pane.addFolder({ title: 'Look' });
+  lk.addInput(P, 'refraction', { min: 0, max: 6, step: 0.05 });
+  lk.addInput(P, 'rim', { label: 'rim thickness', min: 0.4, max: 2.5, step: 0.05 });
+  lk.addInput(P, 'seeThrough', { label: 'see-through', min: 0, max: 1, step: 0.01 });
+  lk.addInput(P, 'density', { label: 'glitter density', min: 0.2, max: 2, step: 0.05 });
+  lk.addInput(P, 'brightness', { label: 'glitter bright', min: 0, max: 3, step: 0.05 });
+  lk.addInput(P, 'twinkle', { min: 0, max: 1, step: 0.05 });
+  lk.addInput(P, 'nebula', { min: 0, max: 2, step: 0.05 });
+  const co = pane.addFolder({ title: 'Colour', expanded: false });
+  [['cVoid', 'void'], ['cBody', 'body'], ['cDeep', 'deep body'], ['cRim', 'rim light'], ['cGlow', 'void glow'], ['cNeb', 'nebula'],
+   ['cStar1', 'glitter white'], ['cStar2', 'glitter cyan'], ['cStar3', 'glitter violet'], ['cStar4', 'glitter blue']]
+    .forEach(([k, label]) => co.addInput(P, k, { label }));
+  const tx = pane.addFolder({ title: 'Type', expanded: false });
+  tx.addInput(P, 'showType', { label: 'show type' });
+  tx.addInput(T, 'line1', { label: 'line 1' });
+  tx.addInput(T, 'line2', { label: 'line 2' });
+  tx.addInput(T, 'tag1', { label: 'label left' });
+  tx.addInput(T, 'tag2', { label: 'label mid' });
+  tx.addInput(T, 'tag3', { label: 'label right' });
+  const pf = pane.addFolder({ title: 'Performance', expanded: false });
+  pf.addInput(P, 'maxDpr', { label: 'max pixel ratio', min: 0.5, max: 3, step: 0.25 });
+  pane.addButton({ title: 'Pour it again' }).on('click', () => { holes.length = 0; drops.length = 0; S.on = false; S.attached = false; resetEdge(true); });
+  const copyBtn = pane.addButton({ title: 'Copy settings' });
+  copyBtn.on('click', () => {
+    const text = JSON.stringify({ settings: P, type: T }, null, 2);
+    const done = label => { copyBtn.title = label; setTimeout(() => { copyBtn.title = 'Copy settings'; }, 1600); };
+    const fallback = () => {
+      let box = document.getElementById('copyBox');
+      if (!box) {
+        box = document.createElement('textarea');
+        box.id = 'copyBox'; box.readOnly = true; box.setAttribute('aria-label', 'Current settings');
+        Object.assign(box.style, { position: 'fixed', right: '12px', bottom: '64px', width: 'min(320px, calc(100vw - 24px))', height: '220px', zIndex: 4,
+          background: '#080a1a', color: '#dfe5ec', border: '1px solid rgba(140,160,255,.35)', borderRadius: '8px', padding: '10px', font: '11px/1.4 "IBM Plex Mono", ui-monospace, monospace' });
+        box.addEventListener('blur', () => box.remove());
+        document.body.appendChild(box);
+      }
+      box.value = text; box.focus(); box.select();
+      done('Selected, press Cmd+C');
+    };
+    try {
+      navigator.clipboard.writeText(text).then(() => done('Copied'), fallback);
+    } catch (err) { fallback(); }
+  });
+  pane.on('change', onPaneChange);
+}
+
+/* ---------- boot ---------- */
+refreshColors();
+setupPane();
+syncTypeBtn();
+if (gl && prog) {
+  resize();
+  window.addEventListener('resize', resize);
+  start();
+  if (document.fonts) {
+    document.fonts.load(`100px ${FONT}`).then(() => { layoutType(); drawScene(); }).catch(() => {});
+    document.fonts.ready.then(() => { layoutType(); drawScene(); });
+  }
+} else {
+  W = innerWidth; H = innerHeight; minD = Math.min(W, H);
+  layoutType();
+  ctlBtn.hidden = true;
+}
+
+})();
+</script>
+</body>
+</html>
