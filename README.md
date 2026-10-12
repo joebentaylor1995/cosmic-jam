@@ -9,7 +9,7 @@ Sticky cosmic goo in raw WebGL2. A glitter-filled mass of space jam hangs over t
 - **Hover** near or inside the goo and it sticks to the cursor. Drag away and it stretches into a strand, thins at the neck and snaps off a droplet that drifts into the void.
 - **Click** (or tap) to blast a hole that shows the type underneath, then oozes shut.
 - **T** toggles the type, so you can see the goo on its own.
-- **P** opens the control panel (viscosity, stickiness, snap distance, refraction, glitter, colours, copy). **Copy settings** exports every value as JSON.
+- **C** opens and closes the control panel, which starts hidden. It covers viscosity, stickiness, snap distance, refraction, glitter, colours and copy. **Copy settings** exports every value as JSON.
 
 ## How it works
 
